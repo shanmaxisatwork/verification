@@ -1,0 +1,192 @@
+name: Max Lyrical Hub Automation
+
+on:
+  schedule:
+    # MORNING SCAN: 7:00 AM IST = 1:30 AM UTC
+    - cron: '30 1 * * *'
+    # AFTERNOON PIPELINE: 2:30 PM IST = 9:00 AM UTC (download + process + upload)
+    - cron: '0 9 * * *'
+  workflow_dispatch:  # Manual trigger from GitHub UI
+    inputs:
+      run_mode:
+        description: 'Which step to run?'
+        required: true
+        default: 'full'
+        type: choice
+        options:
+          - full
+          - monitor_only
+          - download_only
+          - upload_only
+
+env:
+  YT_API_KEY_1: ${{ secrets.YT_API_KEY_1 }}
+  YT_API_KEY_2: ${{ secrets.YT_API_KEY_2 }}
+  YT_API_KEY_3: ${{ secrets.YT_API_KEY_3 }}
+  YT_API_KEY_4: ${{ secrets.YT_API_KEY_4 }}
+  YT_OAUTH_JSON: ${{ secrets.YT_OAUTH_JSON }}
+  OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+  TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+  TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+  YT_COOKIES: ${{ secrets.YT_COOKIES }}
+
+jobs:
+  morning-scan:
+    name: "🔍 Morning Scan (7AM IST)"
+    runs-on: ubuntu-latest
+    # Only run at 1:30 UTC (morning scan) OR manual monitor_only
+    if: |
+      (github.event_name == 'schedule' && github.event.schedule == '30 1 * * *') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.run_mode == 'monitor_only')
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install requests
+
+      - name: Restore state files
+        uses: actions/cache@v4
+        with:
+          path: state/
+          key: state-${{ github.run_id }}
+          restore-keys: |
+            state-
+
+      - name: 🔍 Monitor Channels for New Videos
+        run: python scripts/1_monitor_channels.py
+
+      - name: Save state files
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: state/
+          key: state-${{ github.run_id }}
+
+      - name: Commit updated state
+        run: |
+          git config user.email "bot@maxlyricalhub.com"
+          git config user.name "Max Lyrical Hub Bot"
+          git add state/
+          git diff --staged --quiet || git commit -m "🔍 Morning scan: $(date +'%Y-%m-%d')"
+          git push || echo "Nothing to push"
+
+  afternoon-pipeline:
+    name: "🚀 Afternoon Pipeline (2:30PM IST)"
+    runs-on: ubuntu-latest
+    # Only run at 9:00 UTC (afternoon) OR manual full/download/upload
+    if: |
+      (github.event_name == 'schedule' && github.event.schedule == '0 9 * * *') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.run_mode != 'monitor_only')
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull latest state from repo
+        run: |
+          git pull origin main || echo "Already up to date"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Python dependencies
+        run: |
+                    pip install -q requests google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client
+          pip install -q --force-reinstall "yt-dlp"
+          yt-dlp --version
+
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg
+          ffmpeg -version | head -1
+
+      - name: Create working directories
+        run: |
+          mkdir -p downloads processed state
+
+      - name: Restore state
+        run: |
+          git pull origin main || true
+
+      - name: Check queue status
+        id: check_queue
+        run: |
+          python3 -c "
+          import json, sys
+          try:
+              q = json.load(open('state/download_queue.json'))
+              queued = sum(1 for v in q if v.get('status') == 'queued')
+              print(f'Queued videos: {queued}')
+              if queued == 0:
+                  print('No queued videos found - running monitor first')
+          except:
+              print('No queue file found - running monitor first')
+          "
+
+      - name: 🔍 Run Monitor (if no queue exists)
+        run: |
+          python3 -c "
+          import json, os
+          try:
+              q = json.load(open('state/download_queue.json'))
+              queued = [v for v in q if v.get('status') == 'queued']
+              if queued:
+                  print('Queue exists, skipping monitor')
+                  exit(0)
+          except:
+              pass
+          print('No queue, running monitor...')
+          os.system('python scripts/1_monitor_channels.py')
+          "
+
+      - name: ⬇️ Download Videos
+        if: |
+          github.event.inputs.run_mode != 'upload_only'
+        run: python scripts/2_download_videos.py
+
+      - name: 🎨 Add Watermarks
+        if: |
+          github.event.inputs.run_mode != 'upload_only'
+        run: python scripts/3_add_watermark.py
+
+      - name: 🤖 Generate SEO
+        if: |
+          github.event.inputs.run_mode != 'upload_only'
+        run: python scripts/4_generate_seo.py
+
+      - name: 📤 Upload to YouTube
+        run: python scripts/5_upload_youtube.py
+
+      - name: Commit updated state
+        if: always()
+        run: |
+          git config user.email "bot@maxlyricalhub.com"
+          git config user.name "Max Lyrical Hub Bot"
+          git add state/
+          git diff --staged --quiet || git commit -m "🚀 Pipeline run: $(date +'%Y-%m-%d %H:%M')"
+          git push || echo "Push failed (conflict?), trying pull+push"
+          git pull --rebase origin main && git push || echo "Could not push state"
+
+      - name: Upload artifacts on failure (for debugging)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-screenshots-${{ github.run_id }}
+          path: downloads/*.png
+          if-no-files-found: ignore
+          retention-days: 3

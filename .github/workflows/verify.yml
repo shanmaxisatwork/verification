@@ -1,0 +1,30 @@
+name: 🔍 Watermark Verification
+
+on:
+  schedule:
+    - cron: '0 */3 * * *'
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Install
+        run: |
+          pip install -r requirements.txt
+          playwright install chromium --with-deps
+      - name: Run
+        run: python cloud_validator.py
+      - name: Save
+        run: |
+          git config --global user.name "Watcher Bot"
+          git config --global user.email "bot@verification.com"
+          git add verify_status.json
+          git commit -m "📊 Update status" || echo "No changes"
+          git push

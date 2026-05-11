@@ -1,0 +1,71 @@
+name: Upload to YouTube (Auto after Laptop)
+
+on:
+  workflow_dispatch:  # Triggered by laptop pipeline automatically
+  push:
+    paths:
+      - 'state/download_queue.json'  # Also triggers when laptop pushes queue changes
+
+env:
+  YT_API_KEY_1: ${{ secrets.YT_API_KEY_1 }}
+  YT_API_KEY_2: ${{ secrets.YT_API_KEY_2 }}
+  YT_API_KEY_3: ${{ secrets.YT_API_KEY_3 }}
+  YT_API_KEY_4: ${{ secrets.YT_API_KEY_4 }}
+  YT_OAUTH_JSON: ${{ secrets.YT_OAUTH_JSON }}
+  OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+  TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+  TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+  GITHUB_TOKEN_CUSTOM: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  upload-to-youtube:
+    name: "📤 SEO + Upload to YouTube"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull latest state
+        run: git pull origin main || true
+
+      - name: Check if videos ready
+        id: check
+        run: |
+          python3 -c "
+          import json
+          try:
+              q = json.load(open('state/download_queue.json'))
+              ready = [v for v in q if isinstance(v,dict) and v.get('status')=='ready_for_upload']
+              print(f'Videos ready for upload: {len(ready)}')
+              if len(ready) == 0:
+                  print('NO_VIDEOS_READY')
+                  exit(0)
+          except Exception as e:
+              print(f'Queue check error: {e}')
+          "
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install -q requests google-auth google-auth-oauthlib \
+            google-auth-httplib2 google-api-python-client
+
+      - name: Generate SEO + Upload to YouTube
+        run: python scripts/actions_upload.py
+
+      - name: Commit updated state
+        if: always()
+        run: |
+          git config user.email "bot@maxlyricalhub.com"
+          git config user.name "Max Lyrical Hub Bot"
+          git add state/
+          git diff --staged --quiet || git commit -m "Upload complete: $(date +'%Y-%m-%d %H:%M')"
+          git push || true
